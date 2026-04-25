@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>FractalChain Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+    <style>
+        body { font-family: sans-serif; text-align: center; background: #f4f7f6; padding: 50px; }
+        .card { background: white; padding: 30px; border-radius: 15px; box-shadow: 0 10px 20px rgba(0,0,0,0.1); display: inline-block; width: 500px; }
+        button { background: #4CAF50; color: white; border: none; padding: 15px 20px; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: bold; width: 100%; margin-top: 10px; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        .list-item { background: #e8f5e9; margin: 8px 0; padding: 10px; border-radius: 5px; font-family: monospace; font-size: 13px; text-align: left; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>🌀 FractalChain</h1>
+        <button id="connectBtn" onclick="connectWallet()">지갑 연결하기</button>
+
+        <div id="mainUI" style="display:none;">
+            <p id="statusMsg" style="font-weight: bold; color: #1565c0;">현재 상태: Commit 대기 중</p>
+            <hr>
+            <button id="commitBtn" onclick="commitTransaction()">1단계: 암호화 참여 (Commit)</button>
+            <button id="revealBtn" onclick="revealTransaction()" style="background: #f57c00; display:none;">2단계: 시크릿 공개 (Reveal)</button>
+            <hr>
+            <h3>⚖️ 확정 순서 (시드 셔플 완료)</h3>
+            <div id="shuffleList">라운드 마감 대기 중...</div>
+        </div>
+    </div>
+
+    <script>
+        const CONTRACT_ADDRESS = "0x959922bE3CAee4b8Cd9a407cc3ac1C251C2007B1"; 
+        const ABI = [
+            "function commitTransaction(bytes32 _commitment) external",
+            "function revealTransaction(uint256 _secret) external",
+            "event CommitPhaseClosed(uint256 indexed roundId)",
+            "event RoundClosed(uint256 indexed roundId, uint256 finalSeed, address[] participants)"
+        ];
+
+        let provider, signer, contract, userAddress;
+        let mySecret = null;
+        const OVERRIDE_GAS = { gasLimit: 500000, gasPrice: ethers.utils.parseUnits('1', 'gwei') };
+
+        async function connectWallet() {
+            if (!window.ethereum) return alert("메타마스크가 필요합니다!");
+            try {
+                await window.ethereum.request({ method: 'eth_requestAccounts' });
+                try {
+                    await window.ethereum.request({
+                        method: 'wallet_switchEthereumChain',
+                        params: [{ chainId: '0x7A69' }], 
+                    });
+                } catch (e) {
+                    if (e.code === 4902) {
+                        await window.ethereum.request({
+                            method: 'wallet_addEthereumChain',
+                            params: [{
+                                chainId: '0x7A69',
+                                chainName: 'Fractal Anvil',
+                                rpcUrls: ['http://127.0.0.1:8545'],
+                                nativeCurrency: { name: 'Anvil ETH', symbol: 'aETH', decimals: 18 }
+                            }]
+                        });
+                    }
+                }
+                provider = new ethers.providers.Web3Provider(window.ethereum, "any");
+                signer = provider.getSigner();
+                userAddress = await signer.getAddress();
+                contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, signer);
+
+                document.getElementById('connectBtn').style.display = 'none';
+                document.getElementById('mainUI').style.display = 'block';
+                listenEvents();
+            } catch (err) {
+                console.error(err);
+            }
+        }
+
+        async function commitTransaction() {
+            try {
+                mySecret = Math.floor(Math.random() * 1000000);
+                const commitment = ethers.utils.solidityKeccak256(["uint256", "address"], [mySecret, userAddress]);
+                const tx = await contract.commitTransaction(commitment, OVERRIDE_GAS);
+                document.getElementById('commitBtn').innerText = "전송 중...";
+                document.getElementById('commitBtn').disabled = true;
+                await tx.wait();
+                alert("Commit 완료!");
+            } catch (err) {
+                console.error(err);
+                document.getElementById('commitBtn').disabled = false;
+            }
+        }
+
+        async function revealTransaction() {
+            if (!mySecret) return alert("시크릿이 없습니다!");
+            try {
+                const tx = await contract.revealTransaction(mySecret, OVERRIDE_GAS);
+                document.getElementById('revealBtn').innerText = "전송 중...";
+                document.getElementById('revealBtn').disabled = true;
+                await tx.wait();
+                alert("Reveal 완료!");
+            } catch (err) {
+                console.error(err);
+                document.getElementById('revealBtn').disabled = false;
+            }
+        }
+
+        function listenEvents() {
+            contract.on("CommitPhaseClosed", (roundId) => {
+                document.getElementById('statusMsg').innerText = "현재 상태: Reveal 단계";
+                document.getElementById('statusMsg').style.color = "#f57c00";
+                document.getElementById('commitBtn').style.display = 'none';
+                document.getElementById('revealBtn').style.display = 'block';
+            });
+
+            contract.on("RoundClosed", (roundId, finalSeed, participants) => {
+                document.getElementById('statusMsg').innerText = `라운드 #${roundId} 마감됨!`;
+                document.getElementById('statusMsg').style.color = "#388e3c";
+                document.getElementById('revealBtn').style.display = 'none';
+                
+                // 🚨 방어코드 추가: 큰 숫자(BigNumber) 에러 완벽 차단
+                let seedStr = finalSeed.toString(); 
+                let shuffled = [...participants];
+                
+                for (let i = shuffled.length - 1; i > 0; i--) {
+                    const hash = ethers.utils.solidityKeccak256(['uint256', 'uint256'], [seedStr, i]);
+                    const randIndex = ethers.BigNumber.from(hash).mod(i + 1).toNumber();
+                    [shuffled[i], shuffled[randIndex]] = [shuffled[randIndex], shuffled[i]];
+                }
+
+                const listDiv = document.getElementById('shuffleList');
+                listDiv.innerHTML = shuffled.map((addr, i) => 
+                    `<div class="list-item">
+                        <strong>[최종 ${i+1}번]</strong> ${addr}
+                    </div>`
+                ).join('');
+            });
+        }
+    </script>
+</body>
+</html>
